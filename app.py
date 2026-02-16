@@ -1,105 +1,148 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import os
+from datetime import datetime
 
-# --- Setup ---
-st.set_page_config(page_title="Material PR Tracking", layout="wide", page_icon="📦")
+# --- การตั้งค่าหน้าจอ ---
+st.set_page_config(page_title="Material Control Dashboard", layout="wide", page_icon="📦")
 
-# ฟังก์ชันช่วยหาชื่อคอลัมน์ที่ใกล้เคียงที่สุด (ป้องกัน KeyError)
-def get_col(df, possible_names):
-    for name in possible_names:
-        if name in df.columns:
-            return name
-    return None
-
+# --- ฟังก์ชันโหลดข้อมูลแบบปลอดภัย ---
 @st.cache_data
 def load_data():
-    # พยายามหาไฟล์ CSV ในเครื่อง
-    files = [f for f in os.listdir('.') if f.endswith('.csv')]
-    if not files:
-        return None
-    
-    # เลือกไฟล์ที่น่าจะเป็นฐานข้อมูลหลัก (เลือกไฟล์ที่มีคำว่า Sheet1 หรือไฟล์ที่ใหญ่ที่สุด)
-    target_file = files[0]
-    for f in files:
-        if "Sheet1" in f:
-            target_file = f
-            break
-            
-    df = pd.read_csv(target_file, encoding='utf-8-sig')
-    df.columns = df.columns.str.strip() # ลบช่องว่างที่ชื่อคอลัมน์
-    return df
+    # พยายามหาไฟล์ในชื่อที่กำหนด
+    file_name = "PR_data.csv" 
+    try:
+        # อ่านไฟล์พร้อมรองรับภาษาไทย
+        df = pd.read_csv(file_name, encoding='utf-8-sig')
+        
+        # ล้างช่องว่างในชื่อคอลัมน์
+        df.columns = df.columns.str.strip()
+        
+        # แปลงวันที่ (รองรับรูปแบบจากไฟล์ของคุณ)
+        df['Requisition date'] = pd.to_datetime(df['Requisition date'], errors='coerce')
+        df['Received Date'] = pd.to_datetime(df['Received Date'], errors='coerce')
+        
+        # สร้างสถานะจำลอง (Logic: ถ้ามี Received Date = สำเร็จ, ถ้ามี PO = เปิด PO แล้ว, อื่นๆ = รอ)
+        def determine_status(row):
+            if pd.notnull(row.get('Received Date')): return "✅ Received"
+            if pd.notnull(row.get('Purchase order')): return "🚚 PO Issued"
+            return "⏳ Pending PR"
+        
+        df['Current Status'] = df.apply(determine_status, axis=1)
+        return df
+    except Exception as e:
+        return str(e)
 
-# --- เริ่มโหลดข้อมูล ---
-df_raw = load_data()
+# --- เริ่มการทำงาน ---
+data = load_data()
 
-if df_raw is None:
-    st.error("❌ ไม่พบไฟล์ข้อมูล CSV ใน Repository! กรุณาอัปโหลดไฟล์เข้าไปใน GitHub ด้วยนะครับ")
+# ตรวจสอบ Error เบื้องต้น
+if isinstance(data, str):
+    st.error(f"❌ ระบบหาไฟล์ 'PR_data.csv' ไม่เจอ หรือไฟล์มีปัญหา")
+    st.info(f"รายละเอียด Error: {data}")
     st.stop()
 
-# ทำ Mapping คอลัมน์สำคัญ (เพื่อให้โค้ดไม่พังถ้าชื่อหัวตารางเปลี่ยน)
-col_pr = get_col(df_raw, ['Purchase Requisition', 'PR NO.', '請購單號', 'PR Number'])
-col_date = get_col(df_raw, ['Requisition date', 'DATE', '日期', 'Date'])
-col_item = get_col(df_raw, ['Short Text', 'ITEM DESCRIPTION', '品名規格', 'Material Name'])
-col_po = get_col(df_raw, ['Purchase order', 'PO NO.', 'PO Number'])
-col_status = get_col(df_raw, ['Current Status', 'Remark', 'Status', 'REMARK'])
-col_qty = get_col(df_raw, ['Quantity requested', 'QTY', '數量', 'Quantity'])
+df = data
 
-# --- Sidebar Menu ---
-st.sidebar.title("🏢 Material Control")
-menu = st.sidebar.selectbox("เมนูการใช้งาน", ["📊 Dashboard", "🔍 PR Status Details", "📅 Daily Movement"])
+# --- Sidebar Menu (ใส่ไอคอนสวยๆ) ---
+st.sidebar.markdown("## ⚙️ Main Menu")
+menu = st.sidebar.radio(
+    "เลือกดูข้อมูล:",
+    ["📊 Dashboard Overview", "🔍 PR/PO Status", "📅 Daily Movement"],
+    index=0
+)
 
-# --- 1. หน้า Dashboard ---
-if menu == "📊 Dashboard":
-    st.header("📊 ภาพรวมสถานะวัสดุ")
+# ---------------------------------------------------------
+# หน้า 1: Dashboard ข้อมูลทั้งหมด
+# ---------------------------------------------------------
+if menu == "📊 Dashboard Overview":
+    st.title("📊 PR Material Control Overview")
     
-    # คำนวณสถานะพื้นฐาน
-    total_pr = len(df_raw)
-    has_po = df_raw[col_po].notnull().sum() if col_po else 0
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("จำนวน PR ทั้งหมด", f"{total_pr} รายการ")
-    c2.metric("เปิด PO แล้ว", f"{has_po} รายการ")
-    c3.metric("รอดำเนินการ", f"{total_pr - has_po} รายการ", delta_color="inverse")
+    # ส่วนของ KPI Cards
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Total PR", len(df))
+    with c2:
+        pending = len(df[df['Current Status'] == "⏳ Pending PR"])
+        st.metric("Pending PR", pending, delta="-รอดำเนินการ", delta_color="inverse")
+    with c3:
+        received = len(df[df['Current Status'] == "✅ Received"])
+        st.metric("Received", received)
+    with c4:
+        total_val = df['Total Value'].sum() if 'Total Value' in df.columns else 0
+        st.metric("Total Value", f"฿{total_val:,.0f}")
 
     st.divider()
+
+    # กราฟแสดงสัดส่วน
+    col_chart1, col_chart2 = st.columns(2)
+    with col_chart1:
+        fig_pie = px.pie(df, names='Current Status', title="Status Distribution", 
+                         color='Current Status', color_discrete_map={
+                             "✅ Received": "#2ecc71", "🚚 PO Issued": "#f1c40f", "⏳ Pending PR": "#e74c3c"
+                         })
+        st.plotly_chart(fig_pie, use_container_width=True)
     
-    # กราฟวงกลมแสดงสัดส่วน
-    if col_po:
-        df_raw['Status_Group'] = df_raw[col_po].apply(lambda x: 'PO Issued' if pd.notnull(x) else 'Pending PR')
-        fig = px.pie(df_raw, names='Status_Group', title="สัดส่วนการดำเนินงาน (PR vs PO)",
-                     color_discrete_sequence=['#2ecc71', '#e74c3c'])
-        st.plotly_chart(fig, use_container_width=True)
+    with col_chart2:
+        # สรุปตามกลุ่มผู้ขอซื้อ (Requisitioner)
+        top_req = df['Requisitioner'].value_counts().head(5).reset_index()
+        fig_bar = px.bar(top_req, x='count', y='Requisitioner', orientation='h', title="Top 5 Requisitioners")
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-# --- 2. หน้า PR Status Details ---
-elif menu == "🔍 PR Status Details":
-    st.header("🔍 ตรวจสอบรายละเอียดรายตัว")
-    search = st.text_input("พิมพ์ชื่อวัสดุ หรือ เลขที่ PR เพื่อค้นหา...")
+# ---------------------------------------------------------
+# หน้า 2: Status รายละเอียดของ PR
+# ---------------------------------------------------------
+elif menu == "🔍 PR/PO Status":
+    st.title("🔍 รายละเอียดสถานะการจัดซื้อ")
     
-    if search:
-        mask = df_raw.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)
-        result_df = df_raw[mask]
-    else:
-        result_df = df_raw
+    # ส่วนค้นหา
+    search_term = st.text_input("ค้นหาวัสดุ หรือ เลขที่ PR/PO...", placeholder="พิมพ์ชื่อวัสดุที่นี่")
+    
+    # ฟิลเตอร์ตามสถานะ
+    status_choice = st.multiselect("กรองตามสถานะ:", options=df['Current Status'].unique(), default=df['Current Status'].unique())
+    
+    # กรองข้อมูล
+    mask = df['Current Status'].isin(status_choice)
+    if search_term:
+        mask = mask & (df['Short Text'].str.contains(search_term, case=False, na=False) | 
+                       df['Purchase Requisition'].astype(str).str.contains(search_term))
+    
+    display_df = df[mask]
+    
+    # ปรับแต่งตารางให้สวยงาม
+    st.dataframe(
+        display_df[['Requisition date', 'Purchase Requisition', 'Purchase order', 'Short Text', 'Quantity requested', 'Unit ', 'Current Status', 'Vendor']],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Current Status": st.column_config.TextColumn("Status", width="medium"),
+            "Purchase Requisition": st.column_config.TextColumn("PR No."),
+            "Purchase order": st.column_config.TextColumn("PO No.")
+        }
+    )
 
-    st.dataframe(result_df, use_container_width=True)
-
-# --- 3. หน้า Daily Movement ---
+# ---------------------------------------------------------
+# หน้า 3: รายงานความเคลื่อนไหวประจำวัน
+# ---------------------------------------------------------
 elif menu == "📅 Daily Movement":
-    st.header("📅 รายงานความเคลื่อนไหวประจำวัน")
-    if col_date:
-        # แปลงเป็น datetime
-        df_raw[col_date] = pd.to_datetime(df_raw[col_date], errors='coerce')
-        latest_date = df_raw[col_date].max()
+    st.title("📅 รายงานความเคลื่อนไหว")
+    
+    # เลือกวันที่
+    today = datetime.now().date()
+    select_date = st.date_input("เลือกวันที่เปิด PR:", value=df['Requisition date'].max())
+    
+    report_df = df[df['Requisition date'].dt.date == select_date]
+    
+    if not report_df.empty:
+        st.success(f"พบรายการในวันที่ {select_date} ทั้งหมด {len(report_df)} รายการ")
         
-        selected_date = st.date_input("เลือกวันที่", value=latest_date)
-        daily_df = df_raw[df_raw[col_date].dt.date == selected_date]
-        
-        if not daily_df.empty:
-            st.success(f"พบความเคลื่อนไหว {len(daily_df)} รายการ")
-            st.table(daily_df[[col_pr, col_item, col_qty]])
-        else:
-            st.info("ไม่มีรายการในวันที่เลือก")
+        # แสดงรายการแบบ Card สั้นๆ
+        for idx, row in report_df.iterrows():
+            with st.expander(f"📌 PR: {row['Purchase Requisition']} - {row['Short Text']}"):
+                col_a, col_b = st.columns(2)
+                col_a.write(f"**จำนวน:** {row['Quantity requested']} {row['Unit ']}")
+                col_a.write(f"**ผู้ขอซื้อ:** {row['Requisitioner']}")
+                col_b.write(f"**สถานะปัจจุบัน:** {row['Current Status']}")
+                col_b.write(f"**Vendor:** {row['Vendor']}")
     else:
-        st.warning("ในไฟล์ไม่มีคอลัมน์ 'วันที่' จึงไม่สามารถดูรายงานรายวันได้")
+        st.warning("ไม่มีรายการเปิด PR ในวันที่เลือก")
