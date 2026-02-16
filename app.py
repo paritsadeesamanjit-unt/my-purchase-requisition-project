@@ -1,77 +1,62 @@
 import streamlit as st
 import pandas as pd
+import io
 
-# ตั้งค่าหน้าจอและ Theme
-st.set_page_config(page_title="Material PR Tracking", layout="wide")
+st.set_page_config(page_title="PR Tracking Pro", layout="wide")
+st.title("📦 PR Material Control Tracking")
 
-st.title("📑 PR Material Control Dashboard")
-st.markdown("ระบบติดตามสถานะการเปิด PR และตรวจสอบวัสดุคงค้าง")
+uploaded_file = st.file_uploader("อัปโหลดไฟล์ PR ของคุณ (CSV หรือ Excel)", type=["csv", "xlsx"])
 
-# ฟังก์ชันโหลดข้อมูล (Cache ไว้เพื่อความเร็ว)
-@st.cache_data
-def load_data(file):
-    # อ่านไฟล์ CSV (ข้ามแถวแรกถ้าเป็นหัวกระดาษว่าง)
-    df = pd.read_csv(file)
-    # ล้างข้อมูลเบื้องต้น: ลบแถวที่ไม่มีเลข PR
-    df = df.dropna(subset=['PR NO.'])
-    return df
+if uploaded_file is not None:
+    try:
+        # --- ส่วนการอ่านไฟล์แบบยืดหยุ่น ---
+        if uploaded_file.name.endswith('.csv'):
+            # ลองอ่านหลายๆ Encoding ที่คนไทยชอบใช้
+            for enc in ['utf-8-sig', 'cp874', 'tis-620']:
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, encoding=enc)
+                    break
+                except:
+                    continue
+        else:
+            df = pd.read_excel(uploaded_file)
 
-# ส่วนการอัปโหลด (หรือจะทำเป็น Link ถาวรบน GitHub ก็ได้)
-uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ PR Control (CSV)", type="csv")
+        # --- ส่วนล้างข้อมูล (Data Cleaning) ---
+        # 1. ลบแถวที่ว่างทั้งหมด
+        df = df.dropna(how='all').reset_index(drop=True)
+        
+        # 2. ล้างชื่อคอลัมน์ (ลบช่องว่างหัว-ท้าย)
+        df.columns = [str(c).strip().upper() for c in df.columns]
 
-if uploaded_file:
-    df = load_data(uploaded_file)
-    
-    # --- 1. ส่วนสรุปภาพรวม (KPI) ---
-    st.subheader("📊 สรุปภาพรวมสถานะ")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    total_items = len(df)
-    # สมมติว่าสถานะอยู่ในคอลัมน์ 'REMARK' หรือ 'STATUS'
-    # คุณสามารถปรับชื่อคอลัมน์ได้ตามจริง
-    pending_items = len(df[df['REMARK'].str.contains('รอ|Pending', na=False, case=False)])
-    received_items = len(df[df['REMARK'].str.contains('เข้าแล้ว|Received|ครบ', na=False, case=False)])
-    
-    col1.metric("รายการ PR ทั้งหมด", f"{total_items} รายการ")
-    col2.metric("สถานะรอดำเนินการ", f"{pending_items} รายการ", delta_color="inverse")
-    col3.metric("ได้รับของแล้ว", f"{received_items} รายการ")
-    col4.metric("งบประมาณรวม", f"{df['AMOUNT'].sum():,.2f} บาท") if 'AMOUNT' in df.columns else None
+        # 3. ตรวจสอบว่ามีข้อมูลไหม
+        if not df.empty:
+            st.success(f"✅ โหลดข้อมูลสำเร็จ! พบ {len(df)} รายการ")
+            
+            # สร้างตัวกรองข้อมูล (Sidebar)
+            st.sidebar.header("Filter Options")
+            all_remarks = df['REMARK'].unique() if 'REMARK' in df.columns else ['N/A']
+            selected_status = st.sidebar.multiselect("เลือกสถานะ (Remark)", all_remarks)
 
-    st.divider()
+            # แสดงตาราง
+            st.subheader("📋 รายละเอียดวัสดุ")
+            
+            # ค้นหาแบบ Real-time
+            search = st.text_input("🔍 ค้นหาชื่อวัสดุ หรือ เลขที่ PR")
+            
+            display_df = df.copy()
+            if search:
+                # ค้นหาทุกคอลัมน์ที่เกี่ยวข้อง
+                mask = display_df.apply(lambda row: row.astype(str).str.contains(search, case=False).any(), axis=1)
+                display_df = display_df[mask]
+            
+            if selected_status:
+                display_df = display_df[display_df['REMARK'].isin(selected_status)]
 
-    # --- 2. ระบบค้นหาและ Filter ---
-    st.subheader("🔍 ค้นหาข้อมูลวัสดุ")
-    search_col1, search_col2 = st.columns(2)
-    
-    with search_col1:
-        search_query = st.text_input("ค้นหาจากชื่อวัสดุ หรือ เลขที่ PR")
-    with search_col2:
-        status_filter = st.multiselect("กรองตามสถานะ (Remark)", options=df['REMARK'].unique())
+            st.dataframe(display_df, use_container_width=True)
+        else:
+            st.warning("⚠️ ไฟล์ว่างเปล่า หรือรูปแบบไม่ถูกต้อง")
 
-    # Logic การกรองข้อมูล
-    filtered_df = df.copy()
-    if search_query:
-        filtered_df = filtered_df[
-            filtered_df['ITEM DESCRIPTION'].str.contains(search_query, na=False, case=False) |
-            filtered_df['PR NO.'].astype(str).str.contains(search_query, na=False)
-        ]
-    if status_filter:
-        filtered_df = filtered_df[filtered_df['REMARK'].isin(status_filter)]
-
-    # --- 3. ตารางแสดงผล ---
-    st.dataframe(
-        filtered_df, 
-        use_container_width=True,
-        column_config={
-            "PR NO.": st.column_config.TextColumn("เลขที่ PR"),
-            "DATE": st.column_config.DateColumn("วันที่เปิด PR"),
-            "QTY": st.column_config.NumberColumn("จำนวน"),
-        }
-    )
-
-    # ปุ่ม Export เฉพาะที่ Filter แล้ว
-    csv_data = filtered_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 Download filtered data", csv_data, "filtered_pr.csv", "text/csv")
-
-else:
-    st.info("👈 กรุณาอัปโหลดไฟล์ 'PR of Material Control' ที่แถบเมนูด้านซ้ายเพื่อเริ่มการวิเคราะห์")
+    except Exception as e:
+        st.error(f"❌ ระบบขัดข้อง: {str(e)}")
+        st.info("💡 คำแนะนำ: หากเป็น CSV ลอง Save as จาก Excel เป็น 'CSV UTF-8 (Comma delimited)'")
